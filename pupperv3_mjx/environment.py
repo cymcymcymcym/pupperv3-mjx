@@ -112,6 +112,11 @@ class PupperV3Env(PipelineEnv):
         last_action_noise: float = 0.01,
         kick_vel: float = 0.2,
         kick_probability: float = 0.02,
+        force_probability: float = 0.5,
+        force_duration_range: jax.Array = jp.array([50, 150]),
+        force_magnitude_range: jax.Array = jp.array([5, 15]),
+        force_application_point: jax.Array = jp.array([0.05, 0.0, 0.12]), #body frame
+        force_point_noise_sd: float = 0.02,
         terminal_body_z: float = 0.1,
         early_termination_step_threshold: int = 500,
         terminal_body_angle: float = 0.52,
@@ -155,6 +160,11 @@ class PupperV3Env(PipelineEnv):
             last_action_noise (float): The last action noise.
             kick_vel (float): The kick velocity.
             kick_probability (float): The kick probability.
+            force_probability (float): The probability that a force is active at any given time.
+            force_duration_range (jp.Array): Min and max duration (in steps) for applied forces.
+            force_magnitude_range (jp.Array): Min and max magnitude (in Newtons) for applied forces.
+            force_application_point (jp.Array): Point in body frame where force is applied [x, y, z].
+            force_point_noise_sd (float): Standard deviation of noise added to force application point.
             terminal_body_z (float): The terminal body z.
             early_termination_step_threshold (int): The early termination step threshold.
             terminal_body_angle (float): The terminal body angle.
@@ -201,8 +211,8 @@ class PupperV3Env(PipelineEnv):
         self._init_q = jp.array(sys.mj_model.keyframe("home").qpos)
         self._default_pose = default_pose
         self._desired_abduction_angles = desired_abduction_angles
-        self.lowers = joint_lower_limits
-        self.uppers = joint_upper_limits
+        self.lowers = jp.array(joint_lower_limits)
+        self.uppers = jp.array(joint_upper_limits)
         feet_site = foot_site_names
         feet_site_id = [
             mujoco.mj_name2id(sys.mj_model, mujoco.mjtObj.mjOBJ_SITE.value, f) for f in feet_site
@@ -232,6 +242,12 @@ class PupperV3Env(PipelineEnv):
 
         self._kick_probability = kick_probability
         self._resample_velocity_step = resample_velocity_step
+
+        self._force_probability = force_probability
+        self._force_duration_range = force_duration_range
+        self._force_magnitude_range = force_magnitude_range
+        self._force_application_point = force_application_point
+        self._force_point_noise_sd = force_point_noise_sd
 
         # observation configuration
         self.observation_dim = 36  # 33 without orientation, 36 with orientation
@@ -352,6 +368,11 @@ class PupperV3Env(PipelineEnv):
             "feet_air_time": jp.zeros(4, dtype=float),
             "rewards": {k: 0.0 for k in self._reward_config.rewards.scales.keys()},
             "kick": jp.array([0.0, 0.0]),
+            'force_active': False,
+            'force_remaining_duration': 0,
+            'force_current_vector': jp.array([0.0, 0.0, 0.0]),
+            'force_target_vector': jp.array([0.0, 0.0, 0.0]),
+            'force_application_point_noisy': self._force_application_point,
             "step": 0,
             "desired_world_z_in_body_frame": self.sample_body_orientation(sample_orientation_key),
         }
@@ -371,8 +392,8 @@ class PupperV3Env(PipelineEnv):
         return state
 
     def step(self, state: State, action: jax.Array) -> State:  # pytype: disable=signature-mismatch
-        state.info["rng"], cmd_rng, kick_noise_2, kick_bernoulli, latency_key = jax.random.split(
-            state.info["rng"], 5
+        state.info["rng"], cmd_rng, kick_noise_2, kick_bernoulli, latency_key, force_decision_rng, force_duration_rng, force_direction_rng1, force_direction_rng2, force_magnitude_rng, force_point_noise_rng = jax.random.split(
+            state.info["rng"], 11
         )
 
         # Whether to kick and the kick velocity are both random
@@ -383,6 +404,84 @@ class PupperV3Env(PipelineEnv):
         qvel = state.pipeline_state.qvel  # pytype: disable=attribute-error
         qvel = qvel.at[:2].set(kick + qvel[:2])
         state = state.tree_replace({"pipeline_state.qvel": qvel})
+
+        # FORCE STATE MACHINE - JAX-compatible (no Python if/else on traced values)
+        # theta = azimuth (0 to 2π) - horizontal direction
+        # phi = elevation (0 to π/2) - constrain to upper hemisphere
+        
+        # Always sample new force parameters (but only use them if activating)
+        should_activate = jax.random.bernoulli(force_decision_rng, p=self._force_probability)
+        
+        duration = jax.random.randint(
+            force_duration_rng,
+            (),
+            minval=self._force_duration_range[0],
+            maxval=self._force_duration_range[1] + 1
+        )
+        
+        theta = jax.random.uniform(force_direction_rng1, (), minval=0, maxval=2*jp.pi)
+        phi = jax.random.uniform(force_direction_rng2, (), minval=0, maxval=jp.pi/2)
+        
+        direction = jp.array([
+            jp.sin(phi) * jp.cos(theta),
+            jp.sin(phi) * jp.sin(theta),
+            jp.cos(phi)
+        ])
+        
+        magnitude = jax.random.uniform(
+            force_magnitude_rng, (),
+            minval=self._force_magnitude_range[0],
+            maxval=self._force_magnitude_range[1]
+        )
+        
+        noise = jax.random.normal(force_point_noise_rng, shape=(3,)) * self._force_point_noise_sd
+        noisy_point = self._force_application_point + noise
+        
+        # Check if force duration has expired
+        force_expired = state.info['force_remaining_duration'] <= 0
+        
+        # If expired and should activate, start new force; otherwise decrement or stay at 0
+        state.info["force_active"] = jp.where(force_expired, should_activate, True)
+        state.info["force_remaining_duration"] = jp.where(
+            force_expired,
+            jp.where(should_activate, duration, 0),  # If activating, set duration; else 0
+            state.info["force_remaining_duration"] - 1  # Otherwise decrement
+        )
+        state.info["force_target_vector"] = jp.where(
+            force_expired & should_activate,
+            direction * magnitude,
+            state.info["force_target_vector"]  # Keep existing target if not starting new
+        )
+        state.info["force_application_point_noisy"] = jp.where(
+            force_expired & should_activate,
+            noisy_point,
+            state.info["force_application_point_noisy"]
+        )
+
+        # Smooth interpolation between current and target force
+        alpha = 0.1  # Smoothing factor (lower = smoother transitions)
+        state.info["force_current_vector"] = (
+            alpha * state.info["force_target_vector"] + 
+            (1 - alpha) * state.info["force_current_vector"]
+        )
+        
+        # Apply force at the stored application point
+        torso_pos = state.pipeline_state.x.pos[self._torso_idx - 1]
+        torso_rot = state.pipeline_state.x.rot[self._torso_idx - 1]
+        application_point_world = math.rotate(
+            state.info["force_application_point_noisy"], 
+            torso_rot
+        ) + torso_pos
+
+        r = application_point_world - torso_pos
+        torque = jp.cross(r, state.info["force_current_vector"])
+
+        wrench = jp.concatenate([state.info["force_current_vector"], torque])
+
+        xfrc = jp.zeros_like(state.pipeline_state.xfrc_applied)
+        xfrc = xfrc.at[self._torso_idx - 1].set(wrench)
+
+        state = state.tree_replace({"pipeline_state.xfrc_applied": xfrc})
 
         # Sample an action with random latency
         lagged_action, state.info["action_buffer"] = utils.sample_lagged_value(
