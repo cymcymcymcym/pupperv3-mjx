@@ -385,7 +385,7 @@ class PupperV3Env(PipelineEnv):
         state = state.tree_replace({"pipeline_state.qvel": qvel})
         
         # ADDED -- xfrc
-        wrench = jp.concatenate([10000, 0, 10000], [0, 0, 0])
+        wrench = jp.concatenate([0, 0, 1000000], [0, 0, 0])
         xfrc = jp.zeros_like(state.pipeline.state.xfrc_applied)
         xfrc = xfrc.at[self._torso_idx - 1].set(wrench)
         state = state.tree_replace({"pipeline_state.xfrc_applied": xfrc})
