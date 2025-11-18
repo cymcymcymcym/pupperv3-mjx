@@ -98,7 +98,7 @@ class PupperV3Env(PipelineEnv):
         linear_velocity_x_range: Tuple[float, float] = (-0.75, 0.75),
         linear_velocity_y_range: Tuple[float, float] = (-0.5, 0.5),
         angular_velocity_range: Tuple[float, float] = (-2.0, 2.0),
-        zero_command_probability: float = 0.01,
+        zero_command_probability: float = 0.30,  # Increased for more force compliance training
         stand_still_command_threshold: float = 0.1,
         maximum_pitch_command: float = 0.0,  # degrees
         maximum_roll_command: float = 0.0,  # degrees
@@ -112,7 +112,7 @@ class PupperV3Env(PipelineEnv):
         last_action_noise: float = 0.01,
         kick_vel: float = 0.2,
         kick_probability: float = 0.02,
-        force_probability: float = 0.5,
+        force_probability: float = 0.8,
         force_duration_range: jax.Array = jp.array([50, 150]),
         force_magnitude_range: jax.Array = jp.array([5, 15]),
         force_application_point: jax.Array = jp.array([0.05, 0.0, 0.12]), #body frame
@@ -579,6 +579,11 @@ class PupperV3Env(PipelineEnv):
                 pipeline_state, self._upper_leg_geom_ids
             ),
             "body_collision": rewards.reward_geom_collision(pipeline_state, self._torso_geom_ids),
+            "force_following": rewards.reward_force_following(
+                pipeline_state,
+                torso_body_idx=self._torso_idx - 1,
+                tracking_sigma=self._reward_config.rewards.tracking_sigma,
+            ),
         }
         rewards_dict = {
             k: v * self._reward_config.rewards.scales[k] for k, v in rewards_dict.items()

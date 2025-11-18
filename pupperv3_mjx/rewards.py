@@ -154,3 +154,72 @@ def reward_geom_collision(pipeline_state: base.State, geom_ids: np.array) -> jax
             * (pipeline_state.contact.dist < 0.0)
         )
     return jp.clip(contact, -1000.0, 1000.0)
+
+def reward_force_following(
+    pipeline_state: base.State, 
+    torso_body_idx: int,
+    tracking_sigma: float = 0.5
+) -> jax.Array:
+    """
+    Reward for moving compliantly in response to applied force.
+    Encourages robot to "go with the flow" of external forces with appropriate magnitude.
+    
+    This reward combines:
+    1. Direction alignment (move in force direction)
+    2. Compliance (accelerate appropriately with force magnitude)
+    
+    Args:
+        pipeline_state: The current pipeline state
+        torso_body_idx: Index of the torso/base body (usually 0)
+        tracking_sigma: Scales the reward sensitivity
+    
+    Returns:
+        Reward value (higher when velocity aligns with force and responds appropriately)
+    """
+    # Extract force (first 3 elements of wrench), velocity, and acceleration
+    force = pipeline_state.xfrc_applied[torso_body_idx, :3]  # [fx, fy, fz]
+    velocity = pipeline_state.xd.vel[torso_body_idx]         # [vx, vy, vz]
+    acceleration = pipeline_state.xd.ang[torso_body_idx]     # Using as proxy for body acceleration
+    
+    # Compute force magnitude
+    force_mag = jp.linalg.norm(force)
+    
+    # Only compute reward when force is active
+    force_active = force_mag > 0.1  # Threshold for "force is active"
+    
+    # Component 1: Direction alignment
+    force_direction = force / (force_mag + EPS)
+    velocity_mag = jp.linalg.norm(velocity) + EPS
+    velocity_direction = velocity / velocity_mag
+    
+    # Alignment: 1 when parallel, -1 when opposite
+    alignment = jp.dot(force_direction, velocity_direction)
+    directional_error = 1.0 - alignment  # 0 when aligned, 2 when opposite
+    
+    # Component 2: Magnitude response (compliance)
+    # Idea: Power = F · v. If robot is compliant, it should move proportionally to force
+    # High power with low velocity = resisting (bad)
+    # Low power with high velocity = already moving freely (neutral)
+    power = jp.dot(force, velocity)  # Can be negative if opposing
+    
+    # Normalize power by force magnitude to get "compliance velocity"
+    # If moving with force: power > 0, good
+    # If resisting force: power < 0, bad
+    compliance = power / (force_mag + EPS)
+    
+    # Penalize resistance (negative compliance) and reward yielding (positive compliance)
+    # Target: compliance should be proportional to force magnitude
+    # For a 10N force, we might expect ~0.5 m/s compliance velocity
+    target_compliance = force_mag * 0.05  # 0.05 m/s per Newton (tunable parameter)
+    compliance_error = jp.square(compliance - target_compliance)
+    
+    # Combined error: both direction and magnitude matter
+    total_error = directional_error + compliance_error
+    
+    # Exponential reward
+    reward = jp.exp(-total_error / (tracking_sigma + EPS))
+    
+    # Only give reward when force is active
+    reward = jp.where(force_active, reward, 0.0)
+    
+    return jp.clip(reward, -1000.0, 1000.0)
