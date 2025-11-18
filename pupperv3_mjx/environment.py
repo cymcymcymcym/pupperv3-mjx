@@ -383,6 +383,12 @@ class PupperV3Env(PipelineEnv):
         qvel = state.pipeline_state.qvel  # pytype: disable=attribute-error
         qvel = qvel.at[:2].set(kick + qvel[:2])
         state = state.tree_replace({"pipeline_state.qvel": qvel})
+        
+        # ADDED -- xfrc
+        wrench = jp.concatenate([0, 0, 100], [0, 0, 0])
+        xfrc = jp.zeros_like(state.pipeline.state.xfrc_applied)
+        xfrc = xfrc.at[self._torso_idx - 1].set(wrench)
+        state = state.tree_replace({"pipeline_state.xfrc_applied": xfrc})
 
         # Sample an action with random latency
         lagged_action, state.info["action_buffer"] = utils.sample_lagged_value(
