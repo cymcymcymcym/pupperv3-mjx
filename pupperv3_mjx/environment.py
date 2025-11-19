@@ -369,7 +369,7 @@ class PupperV3Env(PipelineEnv):
             "rewards": {k: 0.0 for k in self._reward_config.rewards.scales.keys()},
             "kick": jp.array([0.0, 0.0]),
             'force_active': False,
-            'force_remaining_duration': 0,
+            'force_remaining_duration': 50,
             'force_current_vector': jp.array([0.0, 0.0, 0.0]),
             'force_target_vector': jp.array([0.0, 0.0, 0.0]),
             'force_application_point_noisy': self._force_application_point,
