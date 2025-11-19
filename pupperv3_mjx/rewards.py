@@ -214,7 +214,8 @@ def reward_force_following(
     compliance_error = jp.square(compliance - target_compliance)
     
     # Combined error: both direction and magnitude matter
-    total_error = directional_error + compliance_error
+    #total_error = directional_error + compliance_error
+    total_error = directional_error
     
     # Exponential reward
     reward = jp.exp(-total_error / (tracking_sigma + EPS))
