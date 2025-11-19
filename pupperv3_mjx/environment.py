@@ -420,7 +420,7 @@ class PupperV3Env(PipelineEnv):
         )
         
         theta = jax.random.uniform(force_direction_rng1, (), minval=0, maxval=2*jp.pi)
-        phi = jax.random.uniform(force_direction_rng2, (), minval=0, maxval=jp.pi/2)
+        phi = jax.random.uniform(force_direction_rng2, (), minval=0, maxval=jp.pi/4)
         
         direction = jp.array([
             jp.sin(phi) * jp.cos(theta),
