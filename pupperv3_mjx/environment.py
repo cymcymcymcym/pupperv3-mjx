@@ -441,7 +441,7 @@ class PupperV3Env(PipelineEnv):
         force_expired = state.info['force_remaining_duration'] <= 0
         
         # If expired and should activate, start new force; otherwise decrement or stay at 0
-        state.info["force_active"] = jp.where(force_expired, should_activate, True)
+        state.info["force_active"] = jp.where(force_expired, should_activate, state.info["force_active"])
         state.info["force_remaining_duration"] = jp.where(
             force_expired,
             jp.where(should_activate, duration, 0),  # If activating, set duration; else 0
@@ -466,8 +466,8 @@ class PupperV3Env(PipelineEnv):
         )
         
         # Apply force at the stored application point
-        torso_pos = state.pipeline_state.x.pos[self._torso_idx - 1]
-        torso_rot = state.pipeline_state.x.rot[self._torso_idx - 1]
+        torso_pos = state.pipeline_state.x.pos[self._torso_idx]
+        torso_rot = state.pipeline_state.x.rot[self._torso_idx]
         application_point_world = math.rotate(
             state.info["force_application_point_noisy"], 
             torso_rot
@@ -476,10 +476,10 @@ class PupperV3Env(PipelineEnv):
         r = application_point_world - torso_pos
         torque = jp.cross(r, state.info["force_current_vector"])
 
-        wrench = jp.concatenate([state.info["force_current_vector"], torque])
+        wrench = jp.concatenate([torque, state.info["force_current_vector"]])
 
         xfrc = jp.zeros_like(state.pipeline_state.xfrc_applied)
-        xfrc = xfrc.at[self._torso_idx - 1].set(wrench)
+        xfrc = xfrc.at[self._torso_idx].set(wrench)
 
         state = state.tree_replace({"pipeline_state.xfrc_applied": xfrc})
 
@@ -510,12 +510,12 @@ class PupperV3Env(PipelineEnv):
 
         # Done if joint limits are reached or robot is falling
         up = jp.array([0.0, 0.0, 1.0])
-        done = jp.dot(math.rotate(up, x.rot[self._torso_idx - 1]), up) < np.cos(
+        done = jp.dot(math.rotate(up, x.rot[self._torso_idx]), up) < np.cos(
             self._terminal_body_angle
         )
         done |= jp.any(joint_angles < self.lowers)
         done |= jp.any(joint_angles > self.uppers)
-        done |= pipeline_state.x.pos[self._torso_idx - 1, 2] < self._terminal_body_z
+        done |= pipeline_state.x.pos[self._torso_idx, 2] < self._terminal_body_z
 
         # Reward
         rewards_dict = {
@@ -581,7 +581,7 @@ class PupperV3Env(PipelineEnv):
             "body_collision": rewards.reward_geom_collision(pipeline_state, self._torso_geom_ids),
             "force_following": rewards.reward_force_following(
                 pipeline_state,
-                torso_body_idx=self._torso_idx - 1,
+                torso_body_idx=self._torso_idx,
                 tracking_sigma=self._reward_config.rewards.tracking_sigma,
             ),
         }
@@ -623,7 +623,7 @@ class PupperV3Env(PipelineEnv):
             state.info["step"],
         )
         # Log total displacement as a proxy metric
-        state.metrics["total_dist"] = math.normalize(x.pos[self._torso_idx - 1])[1]
+        state.metrics["total_dist"] = math.normalize(x.pos[self._torso_idx])[1]
         state.metrics.update(state.info["rewards"])
 
         done = jp.float32(done)

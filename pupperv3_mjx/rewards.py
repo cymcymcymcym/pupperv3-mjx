@@ -176,8 +176,8 @@ def reward_force_following(
     Returns:
         Reward value (higher when velocity aligns with force and responds appropriately)
     """
-    # Extract force (first 3 elements of wrench), velocity, and acceleration
-    force = pipeline_state.xfrc_applied[torso_body_idx, :3]  # [fx, fy, fz]
+    # Extract force (last 3 elements of wrench for Torque-Force convention), velocity, and acceleration
+    force = pipeline_state.xfrc_applied[torso_body_idx, 3:]  # [fx, fy, fz]
     velocity = pipeline_state.xd.vel[torso_body_idx]         # [vx, vy, vz]
     acceleration = pipeline_state.xd.ang[torso_body_idx]     # Using as proxy for body acceleration
     
