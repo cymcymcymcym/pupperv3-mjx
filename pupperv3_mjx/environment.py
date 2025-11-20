@@ -420,7 +420,9 @@ class PupperV3Env(PipelineEnv):
         )
         
         theta = jax.random.uniform(force_direction_rng1, (), minval=0, maxval=2*jp.pi)
-        phi = jax.random.uniform(force_direction_rng2, (), minval=0, maxval=jp.pi/4)
+        # phi is inclination from Z-axis. 0=Up, pi/2=Horizontal.
+        # Sample from pi/3 (60 deg) to pi/2 (90 deg) to get mostly horizontal forces.
+        phi = jax.random.uniform(force_direction_rng2, (), minval=jp.pi/3, maxval=jp.pi/2)
         
         direction = jp.array([
             jp.sin(phi) * jp.cos(theta),
@@ -474,8 +476,8 @@ class PupperV3Env(PipelineEnv):
         ) + torso_pos
 
         r = application_point_world - torso_pos
-        # torque = jp.cross(r, state.info["force_current_vector"])
-        torque = jp.zeros(3) # FORCE ZERO TORQUE FOR DEBUGGING
+        torque = jp.cross(r, state.info["force_current_vector"])
+        # torque = jp.zeros(3) # FORCE ZERO TORQUE FOR DEBUGGING
 
         wrench = jp.concatenate([torque, state.info["force_current_vector"]])
 
