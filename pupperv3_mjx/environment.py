@@ -420,14 +420,18 @@ class PupperV3Env(PipelineEnv):
         )
         
         theta = jax.random.uniform(force_direction_rng1, (), minval=0, maxval=2*jp.pi)
-        # phi is inclination from Z-axis. 0=Up, pi/2=Horizontal.
-        # Sample from pi/3 (60 deg) to pi/2 (90 deg) to get mostly horizontal forces.
-        phi = jax.random.uniform(force_direction_rng2, (), minval=jp.pi/3, maxval=jp.pi/2)
+        # Sample z uniformly to get area-uniform sampling on hemisphere
+        # z range [0, sin(60 deg)] covers 0 to 60 degrees elevation from horizontal
+        max_z = jp.sin(jp.pi/3) # sin(60 deg) approx 0.866
+        z = jax.random.uniform(force_direction_rng2, (), minval=0, maxval=max_z)
+        
+        # Calculate xy radius from z (unit sphere: x^2 + y^2 + z^2 = 1)
+        r_xy = jp.sqrt(1 - z**2)
         
         direction = jp.array([
-            jp.sin(phi) * jp.cos(theta),
-            jp.sin(phi) * jp.sin(theta),
-            jp.cos(phi)
+            r_xy * jp.cos(theta),
+            r_xy * jp.sin(theta),
+            z
         ])
         
         magnitude = jax.random.uniform(
