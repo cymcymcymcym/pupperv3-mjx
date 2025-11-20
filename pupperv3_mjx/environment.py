@@ -1,3 +1,9 @@
+import os
+import tempfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import *
+
 import jax
 import mujoco
 import numpy as np
@@ -5,7 +11,6 @@ from brax import base, math
 from brax.envs.base import PipelineEnv, State
 from brax.io import mjcf
 from jax import numpy as jp
-from typing import *
 
 from pupperv3_mjx import domain_randomization, rewards, utils
 
@@ -112,11 +117,16 @@ class PupperV3Env(PipelineEnv):
         last_action_noise: float = 0.01,
         kick_vel: float = 0.2,
         kick_probability: float = 0.02,
-        force_probability: float = 0.8,
-        force_duration_range: jax.Array = jp.array([50, 150]),
-        force_magnitude_range: jax.Array = jp.array([5, 15]),
-        force_application_point: jax.Array = jp.array([0.0, 0.0, 0.0]), #body frame, was jp.array([0.05, 0.0, 0.12]) before
-        force_point_noise_sd: float = 0.00,
+        leash_attachment_point: jax.Array = jp.array([0.05, 0.0, 0.2]),
+        leash_stiffness: float = 50.0,
+        leash_damping: float = 5.0,
+        leash_slack: float = 0.5,
+        leash_target_speed_range: Tuple[float, float] = (0.0, 1.0),
+        leash_wander_radius: float = 2.0,
+        leash_phase_duration_range: Tuple[float, float] = (1.0, 3.0),
+        leash_target_height: float = 1.0,
+        leash_marker_radius: float = 0.05,
+        leash_marker_rgba: Tuple[float, float, float, float] = (0.2, 0.6, 1.0, 0.8),
         terminal_body_z: float = 0.1,
         early_termination_step_threshold: int = 500,
         terminal_body_angle: float = 0.52,
@@ -160,11 +170,14 @@ class PupperV3Env(PipelineEnv):
             last_action_noise (float): The last action noise.
             kick_vel (float): The kick velocity.
             kick_probability (float): The kick probability.
-            force_probability (float): The probability that a force is active at any given time.
-            force_duration_range (jp.Array): Min and max duration (in steps) for applied forces.
-            force_magnitude_range (jp.Array): Min and max magnitude (in Newtons) for applied forces.
-            force_application_point (jp.Array): Point in body frame where force is applied [x, y, z].
-            force_point_noise_sd (float): Standard deviation of noise added to force application point.
+            leash_attachment_point (jp.Array): Point on the robot body where the leash attaches [x, y, z].
+            leash_stiffness (float): Spring constant controlling leash tension.
+            leash_damping (float): Damping coefficient applied along the leash direction.
+            leash_slack (float): Slack distance before the leash engages.
+            leash_target_speed_range (Tuple[float, float]): Range of target (human) walking speeds.
+            leash_wander_radius (float): Preferred radius for the human relative to the robot.
+            leash_phase_duration_range (Tuple[float, float]): Seconds between target direction updates.
+            leash_target_height (float): Height of the leash attachment point in world coordinates.
             terminal_body_z (float): The terminal body z.
             early_termination_step_threshold (int): The early termination step threshold.
             terminal_body_angle (float): The terminal body angle.
@@ -194,7 +207,38 @@ class PupperV3Env(PipelineEnv):
         sys.mj_model.keyframe("home").qpos[7:] = default_pose
 
         n_frames = self._dt // sys.opt.timestep
+        leash_site_name = "leash_target_site"
+        lept_path = Path(path)
+        xml_str = lept_path.read_text()
+        root = ET.fromstring(xml_str)
+        worldbody = root.find("worldbody")
+        leash_site = worldbody.find(f"site[@name='{leash_site_name}']")
+        if leash_site is None:
+            new_site = ET.SubElement(worldbody, "site")
+            new_site.set("name", leash_site_name)
+            new_site.set("type", "sphere")
+            new_site.set("contype", "0")
+            new_site.set("conaffinity", "0")
+            new_site.set("group", "3")
+            new_site.set("rgba", " ".join(map(str, leash_marker_rgba)))
+            new_site.set("size", f"{leash_marker_radius}")
+            new_site.set("pos", f"0 0 {leash_target_height}")
+
+            with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as tmp:
+                ET.ElementTree(root).write(tmp.name, encoding="unicode")
+                modified_path = tmp.name
+        else:
+            modified_path = path
+
+        sys = mjcf.load(modified_path)
+        if modified_path != path:
+            os.remove(modified_path)
+
         super().__init__(sys, backend="mjx", n_frames=n_frames)
+
+        self._leash_site_id = mujoco.mj_name2id(
+            self.sys.mj_model, mujoco.mjtObj.mjOBJ_SITE.value, leash_site_name
+        )
 
         self._reward_config = reward_config
         self._torso_geom_ids = body_name_to_geom_ids(sys.mj_model, torso_name)
@@ -243,11 +287,20 @@ class PupperV3Env(PipelineEnv):
         self._kick_probability = kick_probability
         self._resample_velocity_step = resample_velocity_step
 
-        self._force_probability = force_probability
-        self._force_duration_range = force_duration_range
-        self._force_magnitude_range = force_magnitude_range
-        self._force_application_point = force_application_point
-        self._force_point_noise_sd = force_point_noise_sd
+        self._leash_attachment_point = jp.array(leash_attachment_point)
+        self._leash_stiffness = leash_stiffness
+        self._leash_damping = leash_damping
+        self._leash_slack = leash_slack
+        self._leash_target_speed_range = leash_target_speed_range
+        self._leash_wander_radius = leash_wander_radius
+        self._leash_target_height = leash_target_height
+        self._leash_marker_radius = leash_marker_radius
+        self._leash_marker_rgba = leash_marker_rgba
+        self._leash_phase_duration_range = leash_phase_duration_range
+        self._leash_phase_steps_min = max(1, int(np.ceil(leash_phase_duration_range[0] / self._dt)))
+        self._leash_phase_steps_max = max(
+            self._leash_phase_steps_min, int(np.ceil(leash_phase_duration_range[1] / self._dt))
+        )
 
         # observation configuration
         self.observation_dim = 36  # 33 without orientation, 36 with orientation
@@ -347,15 +400,73 @@ class PupperV3Env(PipelineEnv):
         return buf
 
     def reset(self, rng: jax.Array) -> State:  # pytype: disable=signature-mismatch
-        rng, sample_command_key, sample_orientation_key, randomize_pos_key = jax.random.split(
-            rng, 4
-        )
+        (
+            rng,
+            sample_command_key,
+            sample_orientation_key,
+            randomize_pos_key,
+            leash_angle_key,
+            leash_dist_key,
+            leash_dir_key,
+            leash_speed_key,
+            leash_phase_key,
+            leash_marker_key,
+        ) = jax.random.split(rng, 10)
 
         init_q = domain_randomization.randomize_qpos(
             self._init_q, self._start_position_config, rng=randomize_pos_key
         )
 
         pipeline_state = self.pipeline_init(init_q, jp.zeros(self._nv))
+
+        torso_pos = pipeline_state.x.pos[self._torso_idx]
+        leash_angle = jax.random.uniform(leash_angle_key, (), minval=0.0, maxval=2 * jp.pi)
+        leash_radius = jax.random.uniform(
+            leash_dist_key,
+            (),
+            minval=self._leash_slack,
+            maxval=self._leash_wander_radius,
+        )
+        leash_offset = jp.array(
+            [leash_radius * jp.cos(leash_angle), leash_radius * jp.sin(leash_angle)]
+        )
+        leash_target_pos = jp.array(
+            [
+                torso_pos[0] + leash_offset[0],
+                torso_pos[1] + leash_offset[1],
+                self._leash_target_height,
+            ]
+        )
+
+        init_speed = jax.random.uniform(
+            leash_speed_key,
+            (),
+            minval=self._leash_target_speed_range[0],
+            maxval=self._leash_target_speed_range[1],
+        )
+        init_direction_angle = jax.random.uniform(
+            leash_dir_key, (), minval=0.0, maxval=2 * jp.pi
+        )
+        leash_target_vel = jp.array(
+            [
+                init_speed * jp.cos(init_direction_angle),
+                init_speed * jp.sin(init_direction_angle),
+                0.0,
+            ]
+        )
+        leash_phase_remaining = jax.random.randint(
+            leash_phase_key,
+            (),
+            minval=self._leash_phase_steps_min,
+            maxval=self._leash_phase_steps_max + 1,
+        )
+
+        # Optional: slight noise for marker coloring (unused currently)
+        marker_visible = True
+
+        # Update visual leash marker position in pipeline state
+        site_xpos = pipeline_state.site_xpos.at[self._leash_site_id].set(leash_target_pos)
+        pipeline_state = pipeline_state.tree_replace({"site_xpos": site_xpos})
 
         state_info = {
             "rng": rng,
@@ -368,11 +479,9 @@ class PupperV3Env(PipelineEnv):
             "feet_air_time": jp.zeros(4, dtype=float),
             "rewards": {k: 0.0 for k in self._reward_config.rewards.scales.keys()},
             "kick": jp.array([0.0, 0.0]),
-            'force_active': False,
-            'force_remaining_duration': 50,
-            'force_current_vector': jp.array([0.0, 0.0, 0.0]),
-            'force_target_vector': jp.array([0.0, 0.0, 0.0]),
-            'force_application_point_noisy': self._force_application_point,
+            "leash_target_pos": leash_target_pos,
+            "leash_target_vel": leash_target_vel,
+            "leash_phase_remaining": leash_phase_remaining,
             "step": 0,
             "desired_world_z_in_body_frame": self.sample_body_orientation(sample_orientation_key),
         }
@@ -389,11 +498,22 @@ class PupperV3Env(PipelineEnv):
             pipeline_state, obs, reward, done, metrics, state_info
         )  # pytype: disable=wrong-arg-types
 
+        if marker_visible:
+            pipeline_state = pipeline_state.tree_replace(
+                {
+                    "site_xpos": pipeline_state.site_xpos.at[self._leash_target_site_id].set(
+                        leash_target_pos
+                    )
+                }
+            )
+
+        state = state.replace(pipeline_state=pipeline_state)
+
         return state
 
     def step(self, state: State, action: jax.Array) -> State:  # pytype: disable=signature-mismatch
-        state.info["rng"], cmd_rng, kick_noise_2, kick_bernoulli, latency_key, force_decision_rng, force_duration_rng, force_direction_rng1, force_direction_rng2, force_magnitude_rng, force_point_noise_rng = jax.random.split(
-            state.info["rng"], 11
+        state.info["rng"], cmd_rng, kick_noise_2, kick_bernoulli, latency_key, leash_phase_rng, leash_speed_rng, leash_angle_rng = jax.random.split(
+            state.info["rng"], 8
         )
 
         # Whether to kick and the kick velocity are both random
@@ -405,85 +525,97 @@ class PupperV3Env(PipelineEnv):
         qvel = qvel.at[:2].set(kick + qvel[:2])
         state = state.tree_replace({"pipeline_state.qvel": qvel})
 
-        # FORCE STATE MACHINE - JAX-compatible (no Python if/else on traced values)
-        # theta = azimuth (0 to 2π) - horizontal direction
-        # phi = elevation (0 to π/2) - constrain to upper hemisphere
-        
-        # Always sample new force parameters (but only use them if activating)
-        should_activate = jax.random.bernoulli(force_decision_rng, p=self._force_probability)
-        
-        duration = jax.random.randint(
-            force_duration_rng,
+        # Update leash target motion (tethered random walk)
+        leash_phase_remaining = state.info["leash_phase_remaining"] - 1
+        phase_finished = leash_phase_remaining <= 0
+
+        new_phase_steps = jax.random.randint(
+            leash_phase_rng,
             (),
-            minval=self._force_duration_range[0],
-            maxval=self._force_duration_range[1] + 1
-        )
-        
-        theta = jax.random.uniform(force_direction_rng1, (), minval=0, maxval=2*jp.pi)
-        # Sample z uniformly to get area-uniform sampling on hemisphere
-        # z range [0, sin(60 deg)] covers 0 to 60 degrees elevation from horizontal
-        max_z = jp.sin(jp.pi/3) # sin(60 deg) approx 0.866
-        z = jax.random.uniform(force_direction_rng2, (), minval=0, maxval=max_z)
-        
-        # Calculate xy radius from z (unit sphere: x^2 + y^2 + z^2 = 1)
-        r_xy = jp.sqrt(1 - z**2)
-        
-        direction = jp.array([
-            r_xy * jp.cos(theta),
-            r_xy * jp.sin(theta),
-            z
-        ])
-        
-        magnitude = jax.random.uniform(
-            force_magnitude_rng, (),
-            minval=self._force_magnitude_range[0],
-            maxval=self._force_magnitude_range[1]
-        )
-        
-        noise = jax.random.normal(force_point_noise_rng, shape=(3,)) * self._force_point_noise_sd
-        noisy_point = self._force_application_point + noise
-        
-        # Check if force duration has expired
-        force_expired = state.info['force_remaining_duration'] <= 0
-        
-        # If expired and should activate, start new force; otherwise decrement or stay at 0
-        state.info["force_active"] = jp.where(force_expired, should_activate, state.info["force_active"])
-        state.info["force_remaining_duration"] = jp.where(
-            force_expired,
-            jp.where(should_activate, duration, 0),  # If activating, set duration; else 0
-            state.info["force_remaining_duration"] - 1  # Otherwise decrement
-        )
-        state.info["force_target_vector"] = jp.where(
-            force_expired & should_activate,
-            direction * magnitude,
-            state.info["force_target_vector"]  # Keep existing target if not starting new
-        )
-        state.info["force_application_point_noisy"] = jp.where(
-            force_expired & should_activate,
-            noisy_point,
-            state.info["force_application_point_noisy"]
+            minval=self._leash_phase_steps_min,
+            maxval=self._leash_phase_steps_max + 1,
         )
 
-        # Smooth interpolation between current and target force
-        alpha = 0.1  # Smoothing factor (lower = smoother transitions)
-        state.info["force_current_vector"] = (
-            alpha * state.info["force_target_vector"] + 
-            (1 - alpha) * state.info["force_current_vector"]
+        new_speed = jax.random.uniform(
+            leash_speed_rng,
+            (),
+            minval=self._leash_target_speed_range[0],
+            maxval=self._leash_target_speed_range[1],
         )
-        
-        # Apply force at the stored application point
+        new_angle = jax.random.uniform(leash_angle_rng, (), minval=0.0, maxval=2 * jp.pi)
+        random_dir_xy = jp.array([jp.cos(new_angle), jp.sin(new_angle)])
+
+        target_pos = state.info["leash_target_pos"]
+        robot_pos = state.pipeline_state.x.pos[self._torso_idx]
+        to_robot_xy = robot_pos[:2] - target_pos[:2]
+        dist_to_robot = jp.linalg.norm(to_robot_xy)
+        towards_robot = to_robot_xy / (dist_to_robot + 1e-8)
+        away_from_robot = -towards_robot
+
+        direction_xy = jp.where(
+            dist_to_robot > self._leash_wander_radius,
+            towards_robot,
+            random_dir_xy,
+        )
+        direction_xy = jp.where(
+            dist_to_robot < self._leash_slack,
+            away_from_robot,
+            direction_xy,
+        )
+
+        new_velocity_xy = direction_xy * new_speed
+        new_velocity = jp.array([new_velocity_xy[0], new_velocity_xy[1], 0.0])
+
+        leash_target_vel = jp.where(phase_finished, new_velocity, state.info["leash_target_vel"])
+        leash_phase_remaining = jp.where(phase_finished, new_phase_steps, leash_phase_remaining)
+
+        target_pos = target_pos + leash_target_vel * self._dt
+        max_distance = self._leash_wander_radius * 1.5
+        delta_target = target_pos - robot_pos
+        distance_target = jp.linalg.norm(delta_target)
+        clamped_target = robot_pos + delta_target * (max_distance / (distance_target + 1e-8))
+        target_pos = jp.where(distance_target > max_distance, clamped_target, target_pos)
+        target_pos = target_pos.at[2].set(self._leash_target_height)
+
+        state.info["leash_target_pos"] = target_pos
+        state.info["leash_target_vel"] = leash_target_vel
+        state.info["leash_phase_remaining"] = leash_phase_remaining
+
+        site_xpos = state.pipeline_state.site_xpos.at[self._leash_site_id].set(target_pos)
+        state = state.replace(
+            pipeline_state=state.pipeline_state.tree_replace({"site_xpos": site_xpos})
+        )
+
+        # Compute leash force (spring-damper, no compression)
         torso_pos = state.pipeline_state.x.pos[self._torso_idx]
         torso_rot = state.pipeline_state.x.rot[self._torso_idx]
         application_point_world = math.rotate(
-            state.info["force_application_point_noisy"], 
+            self._leash_attachment_point,
             torso_rot
         ) + torso_pos
 
-        r = application_point_world - torso_pos
-        torque = jp.cross(r, state.info["force_current_vector"])
-        # torque = jp.zeros(3) # FORCE ZERO TORQUE FOR DEBUGGING
+        diff = state.info["leash_target_pos"] - application_point_world
+        distance = jp.linalg.norm(diff)
+        direction = diff / (distance + 1e-8)
+        stretch = distance - self._leash_slack
+        taut = stretch > 0.0
 
-        wrench = jp.concatenate([torque, state.info["force_current_vector"]])
+        spring_force = self._leash_stiffness * jp.maximum(0.0, stretch)
+
+        v_com = state.pipeline_state.xd.vel[self._torso_idx]
+        ang_vel = state.pipeline_state.xd.ang[self._torso_idx]
+        r = application_point_world - torso_pos
+        attachment_vel = v_com + jp.cross(ang_vel, r)
+        relative_speed = jp.dot(attachment_vel, direction)
+        damping_force = -self._leash_damping * relative_speed
+
+        total_force_mag = jp.maximum(0.0, spring_force + damping_force)
+        total_force_mag = jp.where(taut, total_force_mag, 0.0)
+        leash_force = direction * total_force_mag
+
+        torque = jp.cross(r, leash_force)
+
+        wrench = jp.concatenate([torque, leash_force])
 
         xfrc = jp.zeros_like(state.pipeline_state.xfrc_applied)
         xfrc = xfrc.at[self._torso_idx].set(wrench)
@@ -495,10 +627,23 @@ class PupperV3Env(PipelineEnv):
             latency_key, state.info["action_buffer"], action, self._latency_distribution
         )
 
+        # Update leash marker site
+        state.pipeline_state = state.pipeline_state.tree_replace(
+            {
+                "site_xpos": state.pipeline_state.site_xpos.at[self._leash_target_site_id].set(
+                    state.info["leash_target_pos"]
+                )
+            }
+        )
+
         # Physics step
         motor_targets = self._default_pose + lagged_action * self._action_scale
         motor_targets = jp.clip(motor_targets, self.lowers, self.uppers)
         pipeline_state = self.pipeline_step(state.pipeline_state, motor_targets)
+        site_xpos_new = pipeline_state.site_xpos.at[self._leash_site_id].set(
+            state.info["leash_target_pos"]
+        )
+        pipeline_state = pipeline_state.tree_replace({"site_xpos": site_xpos_new})
         x, xd = pipeline_state.x, pipeline_state.xd
 
         # Observation data
