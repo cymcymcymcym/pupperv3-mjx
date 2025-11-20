@@ -474,7 +474,8 @@ class PupperV3Env(PipelineEnv):
         ) + torso_pos
 
         r = application_point_world - torso_pos
-        torque = jp.cross(r, state.info["force_current_vector"])
+        # torque = jp.cross(r, state.info["force_current_vector"])
+        torque = jp.zeros(3) # FORCE ZERO TORQUE FOR DEBUGGING
 
         wrench = jp.concatenate([torque, state.info["force_current_vector"]])
 
