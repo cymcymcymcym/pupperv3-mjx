@@ -402,7 +402,7 @@ class PupperV3Env(PipelineEnv):
     def reset(self, rng: jax.Array) -> State:  # pytype: disable=signature-mismatch
         (
             rng,
-            sample_command_key,
+            _sample_command_key,
             sample_orientation_key,
             randomize_pos_key,
             leash_angle_key,
@@ -474,7 +474,9 @@ class PupperV3Env(PipelineEnv):
             "action_buffer": self.initial_action_buffer(),
             "imu_buffer": self.initial_imu_buffer(),
             "last_vel": jp.zeros(12, dtype=float),
-            "command": self.sample_command(sample_command_key),
+            # Command sampling disabled – keep zero command for leash-follow training.
+            # "command": self.sample_command(sample_command_key),
+            "command": jp.zeros(3),
             "last_contact": jp.zeros(4, dtype=bool),
             "feet_air_time": jp.zeros(4, dtype=float),
             "rewards": {k: 0.0 for k in self._reward_config.rewards.scales.keys()},
@@ -512,9 +514,16 @@ class PupperV3Env(PipelineEnv):
         return state
 
     def step(self, state: State, action: jax.Array) -> State:  # pytype: disable=signature-mismatch
-        state.info["rng"], cmd_rng, kick_noise_2, kick_bernoulli, latency_key, leash_phase_rng, leash_speed_rng, leash_angle_rng = jax.random.split(
-            state.info["rng"], 8
-        )
+        (
+            state.info["rng"],
+            _cmd_rng,
+            kick_noise_2,
+            kick_bernoulli,
+            latency_key,
+            leash_phase_rng,
+            leash_speed_rng,
+            leash_angle_rng,
+        ) = jax.random.split(state.info["rng"], 8)
 
         # Whether to kick and the kick velocity are both random
         kick = (
@@ -733,7 +742,9 @@ class PupperV3Env(PipelineEnv):
             "body_collision": rewards.reward_geom_collision(pipeline_state, self._torso_geom_ids),
             "force_following": rewards.reward_force_following(
                 pipeline_state,
-                torso_body_idx=self._torso_idx,
+                leash_attachment_point=application_point_world,
+                leash_target_pos=state.info["leash_target_pos"],
+                leash_slack=self._leash_slack,
                 tracking_sigma=self._reward_config.rewards.tracking_sigma,
             ),
         }
@@ -755,11 +766,8 @@ class PupperV3Env(PipelineEnv):
         state.info["step"] += 1
 
         # Sample new command if more than 500 timesteps achieved
-        state.info["command"] = jp.where(
-            state.info["step"] > self._resample_velocity_step,
-            self.sample_command(cmd_rng),
-            state.info["command"],
-        )
+        # Always zero command (leash guidance only)
+        state.info["command"] = jp.zeros(3)
 
         # Resample new desired body orientation
         state.info["desired_world_z_in_body_frame"] = jp.where(
