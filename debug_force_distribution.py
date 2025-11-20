@@ -37,9 +37,12 @@ for i in range(n_steps):
     
     # env._torso_idx is 1. 
     force = state.pipeline_state.xfrc_applied[env._torso_idx, 3:]
+    torque = state.pipeline_state.xfrc_applied[env._torso_idx, :3]
     
     if jp.linalg.norm(force) > 0.1:
         force_vectors.append(np.array(force))
+        if jp.linalg.norm(torque) > 1e-6:
+            print(f"WARNING: Non-zero torque detected! {torque}")
 
 force_vectors = np.array(force_vectors)
 
