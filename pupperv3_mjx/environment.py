@@ -224,7 +224,9 @@ class PupperV3Env(PipelineEnv):
             new_site.set("size", f"{leash_marker_radius}")
             new_site.set("pos", f"0 0 {leash_target_height}")
 
-            with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as tmp:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".xml", dir=lept_path.parent, delete=False
+            ) as tmp:
                 ET.ElementTree(root).write(tmp.name, encoding="unicode")
                 modified_path = tmp.name
         else:
@@ -503,7 +505,7 @@ class PupperV3Env(PipelineEnv):
         if marker_visible:
             pipeline_state = pipeline_state.tree_replace(
                 {
-                    "site_xpos": pipeline_state.site_xpos.at[self._leash_target_site_id].set(
+                    "site_xpos": pipeline_state.site_xpos.at[self._leash_site_id].set(
                         leash_target_pos
                     )
                 }
@@ -639,7 +641,7 @@ class PupperV3Env(PipelineEnv):
         # Update leash marker site
         state.pipeline_state = state.pipeline_state.tree_replace(
             {
-                "site_xpos": state.pipeline_state.site_xpos.at[self._leash_target_site_id].set(
+                "site_xpos": state.pipeline_state.site_xpos.at[self._leash_site_id].set(
                     state.info["leash_target_pos"]
                 )
             }
