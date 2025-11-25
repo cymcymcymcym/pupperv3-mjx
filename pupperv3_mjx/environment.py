@@ -653,8 +653,6 @@ class PupperV3Env(PipelineEnv):
             state.info["leash_target_pos"]
         )
         pipeline_state = pipeline_state.tree_replace({"site_xpos": site_xpos_new})
-        pipeline_state = pipeline_state.tree_replace({"site_size": pipeline_state.site_size.at[self._leash_site_id].set(jp.array([leash_marker_radius]))})
-        pipeline_state = pipeline_state.tree_replace({"site_rgba": pipeline_state.site_rgba.at[self._leash_site_id].set(jp.array(leash_marker_rgba))})
         x, xd = pipeline_state.x, pipeline_state.xd
 
         # Observation data
