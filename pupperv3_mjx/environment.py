@@ -217,8 +217,6 @@ class PupperV3Env(PipelineEnv):
             new_site = ET.SubElement(worldbody, "site")
             new_site.set("name", leash_site_name)
             new_site.set("type", "sphere")
-            new_site.set("contype", "0")
-            new_site.set("conaffinity", "0")
             new_site.set("group", "3")
             new_site.set("rgba", " ".join(map(str, leash_marker_rgba)))
             new_site.set("size", f"{leash_marker_radius}")
