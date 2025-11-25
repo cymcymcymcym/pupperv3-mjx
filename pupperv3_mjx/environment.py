@@ -637,12 +637,14 @@ class PupperV3Env(PipelineEnv):
         )
 
         # Update leash marker site
-        state.pipeline_state = state.pipeline_state.tree_replace(
-            {
-                "site_xpos": state.pipeline_state.site_xpos.at[self._leash_site_id].set(
-                    state.info["leash_target_pos"]
-                )
-            }
+        state = state.replace(
+            pipeline_state=state.pipeline_state.tree_replace(
+                {
+                    "site_xpos": state.pipeline_state.site_xpos.at[self._leash_site_id].set(
+                        state.info["leash_target_pos"]
+                    )
+                }
+            )
         )
 
         # Physics step
