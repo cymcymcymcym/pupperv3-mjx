@@ -409,7 +409,36 @@ class PupperV3Env(PipelineEnv):
             leash_speed_key,
             leash_phase_key,
             leash_marker_key,
-        ) = jax.random.split(rng, 10)
+            leash_stiffness_key,
+            leash_damping_key,
+            leash_slack_key,
+            leash_attach_key,
+        ) = jax.random.split(rng, 14)
+        
+        # Domain randomization for leash physical properties
+        # Randomize stiffness: 0.5x to 2.0x of nominal
+        leash_stiffness_scale = jax.random.uniform(
+            leash_stiffness_key, (), minval=0.5, maxval=2.0
+        )
+        leash_stiffness = self._leash_stiffness * leash_stiffness_scale
+        
+        # Randomize damping: 0.5x to 2.0x of nominal
+        leash_damping_scale = jax.random.uniform(
+            leash_damping_key, (), minval=0.5, maxval=2.0
+        )
+        leash_damping = self._leash_damping * leash_damping_scale
+        
+        # Randomize slack: 0.7x to 1.3x of nominal
+        leash_slack_scale = jax.random.uniform(
+            leash_slack_key, (), minval=0.7, maxval=1.3
+        )
+        leash_slack = self._leash_slack * leash_slack_scale
+        
+        # Randomize attachment point: ±2cm in each axis
+        leash_attach_noise = jax.random.uniform(
+            leash_attach_key, (3,), minval=-0.02, maxval=0.02
+        )
+        leash_attachment_point = self._leash_attachment_point + leash_attach_noise
 
         init_q = domain_randomization.randomize_qpos(
             self._init_q, self._start_position_config, rng=randomize_pos_key
@@ -419,10 +448,11 @@ class PupperV3Env(PipelineEnv):
 
         torso_pos = pipeline_state.x.pos[self._torso_idx]
         leash_angle = jax.random.uniform(leash_angle_key, (), minval=0.0, maxval=2 * jp.pi)
+        # Use randomized slack for initial leash position
         leash_radius = jax.random.uniform(
             leash_dist_key,
             (),
-            minval=self._leash_slack,
+            minval=leash_slack,
             maxval=self._leash_wander_radius,
         )
         leash_offset = jp.array(
@@ -482,6 +512,11 @@ class PupperV3Env(PipelineEnv):
             "leash_target_pos": leash_target_pos,
             "leash_target_vel": leash_target_vel,
             "leash_phase_remaining": leash_phase_remaining,
+            # Domain-randomized leash parameters (per episode)
+            "leash_stiffness": leash_stiffness,
+            "leash_damping": leash_damping,
+            "leash_slack": leash_slack,
+            "leash_attachment_point": leash_attachment_point,
             "step": 0,
             "desired_world_z_in_body_frame": self.sample_body_orientation(sample_orientation_key),
         }
@@ -559,13 +594,16 @@ class PupperV3Env(PipelineEnv):
         towards_robot = to_robot_xy / (dist_to_robot + 1e-8)
         away_from_robot = -towards_robot
 
+        # Use randomized slack from state.info for direction decisions
+        leash_slack = state.info["leash_slack"]
+        
         direction_xy = jp.where(
             dist_to_robot > self._leash_wander_radius,
             towards_robot,
             random_dir_xy,
         )
         direction_xy = jp.where(
-            dist_to_robot < self._leash_slack,
+            dist_to_robot < leash_slack,
             away_from_robot,
             direction_xy,
         )
@@ -594,27 +632,32 @@ class PupperV3Env(PipelineEnv):
         )
 
         # Compute leash force (spring-damper, no compression)
+        # Use domain-randomized leash parameters from state.info
+        leash_stiffness = state.info["leash_stiffness"]
+        leash_damping = state.info["leash_damping"]
+        leash_attachment_point = state.info["leash_attachment_point"]
+        
         torso_pos = state.pipeline_state.x.pos[self._torso_idx]
         torso_rot = state.pipeline_state.x.rot[self._torso_idx]
         application_point_world = math.rotate(
-            self._leash_attachment_point,
+            leash_attachment_point,
             torso_rot
         ) + torso_pos
 
         diff = state.info["leash_target_pos"] - application_point_world
         distance = jp.linalg.norm(diff)
         direction = diff / (distance + 1e-8)
-        stretch = distance - self._leash_slack
+        stretch = distance - leash_slack
         taut = stretch > 0.0
 
-        spring_force = self._leash_stiffness * jp.maximum(0.0, stretch)
+        spring_force = leash_stiffness * jp.maximum(0.0, stretch)
 
         v_com = state.pipeline_state.xd.vel[self._torso_idx]
         ang_vel = state.pipeline_state.xd.ang[self._torso_idx]
         r = application_point_world - torso_pos
         attachment_vel = v_com + jp.cross(ang_vel, r)
         relative_speed = jp.dot(attachment_vel, direction)
-        damping_force = -self._leash_damping * relative_speed
+        damping_force = -leash_damping * relative_speed
 
         total_force_mag = jp.maximum(0.0, spring_force + damping_force)
         total_force_mag = jp.where(taut, total_force_mag, 0.0)
@@ -744,7 +787,7 @@ class PupperV3Env(PipelineEnv):
                 pipeline_state,
                 leash_attachment_point=application_point_world,
                 leash_target_pos=state.info["leash_target_pos"],
-                leash_slack=self._leash_slack,
+                leash_slack=state.info["leash_slack"],
                 tracking_sigma=self._reward_config.rewards.tracking_sigma,
             ),
         }
