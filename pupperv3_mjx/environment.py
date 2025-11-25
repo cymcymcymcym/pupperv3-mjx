@@ -516,7 +516,7 @@ class PupperV3Env(PipelineEnv):
     def step(self, state: State, action: jax.Array) -> State:  # pytype: disable=signature-mismatch
         (
             state.info["rng"],
-            _cmd_rng,
+            cmd_rng,
             kick_noise_2,
             kick_bernoulli,
             latency_key,
