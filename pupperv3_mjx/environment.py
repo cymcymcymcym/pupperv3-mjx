@@ -1,3 +1,4 @@
+import os
 import jax
 import mujoco
 import numpy as np
@@ -115,8 +116,8 @@ class PupperV3Env(PipelineEnv):
         force_probability: float = 0.8,
         force_duration_range: jax.Array = jp.array([50, 150]),
         force_magnitude_range: jax.Array = jp.array([5, 15]),
-        force_application_point: jax.Array = jp.array([0.0, 0.0, 0.0]), #body frame, was jp.array([0.05, 0.0, 0.12]) before
-        force_point_noise_sd: float = 0.00,
+        force_application_point: jax.Array = jp.array([0.05, 0.0, 0.12]), #body frame, was jp.array([0.05, 0.0, 0.12]) before
+        force_point_noise_sd: float = 0.015,
         terminal_body_z: float = 0.1,
         early_termination_step_threshold: int = 500,
         terminal_body_angle: float = 0.52,
@@ -481,7 +482,7 @@ class PupperV3Env(PipelineEnv):
 
         r = application_point_world - torso_pos
         torque = jp.cross(r, state.info["force_current_vector"])
-        # torque = jp.zeros(3) # FORCE ZERO TORQUE FOR DEBUGGING
+        #torque = jp.zeros(3) # FORCE ZERO TORQUE FOR DEBUGGING
 
         wrench = jp.concatenate([torque, state.info["force_current_vector"]])
 
@@ -708,8 +709,78 @@ class PupperV3Env(PipelineEnv):
 
         return new_obs_history
 
+    def _draw_force_arrow(
+        self,
+        renderer: mujoco.Renderer,
+        origin: np.ndarray,
+        force: np.ndarray,
+        scale: float = 0.05,
+        rgba: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 1.0),
+    ) -> None:
+        """Draw a world-frame force arrow into the MuJoCo renderer scene."""
+        p1 = np.asarray(origin, dtype=np.float64)
+        p2 = p1 + np.asarray(force, dtype=np.float64) * scale
+        geom_index = renderer.scene.ngeom
+        if geom_index >= renderer.scene.maxgeom:
+            return
+        geom = renderer.scene.geoms[geom_index]
+        mujoco.mjv_initGeom(
+            geom,
+            type=mujoco.mjtGeom.mjGEOM_ARROW,
+            size=np.zeros(3),
+            pos=np.zeros(3),
+            mat=np.eye(3).flatten(),
+            rgba=np.asarray(rgba, dtype=np.float32),
+        )
+        mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_ARROW, 0.01, p1, p2)
+        renderer.scene.ngeom += 1
+
     def render(
-        self, trajectory: List[base.State], camera: Optional[str] = None
+        self,
+        trajectory: List[base.State],
+        camera: Optional[str] = None,
+        force_vis_scale: float = 0.05,
     ) -> Sequence[np.ndarray]:
-        camera = camera or "track"
-        return super().render(trajectory, camera=camera)
+        """Render trajectory frames with applied force arrows overlaid."""
+        camera = camera or "tracking_cam"
+        width, height = 640, 480
+        os.environ.setdefault("MUJOCO_GL", "egl")
+        model = self.sys.mj_model
+        renderer: Optional[mujoco.Renderer] = None
+        gl_context: Optional[mujoco.GLContext] = None
+        frames: List[np.ndarray] = []
+
+        try:
+            try:
+                gl_context = mujoco.GLContext(max_width=width, max_height=height)
+            except mujoco.FatalError:
+                os.environ["MUJOCO_GL"] = "osmesa"
+                gl_context = mujoco.GLContext(max_width=width, max_height=height)
+            gl_context.make_current()
+            renderer = mujoco.Renderer(model, height=height, width=width)
+
+            for pipeline_state in trajectory:
+                data = mujoco.MjData(model)
+                mujoco.mj_resetData(model, data)
+                data.qpos[:] = np.asarray(pipeline_state.q)
+                data.qvel[:] = np.asarray(pipeline_state.qd)
+                data.xfrc_applied[:] = np.asarray(pipeline_state.xfrc_applied)
+                mujoco.mj_forward(model, data)
+
+                renderer.update_scene(data, camera=camera)
+
+                force = np.asarray(pipeline_state.xfrc_applied[self._torso_idx, 3:])
+                if np.linalg.norm(force) > 0.1:
+                    torso_pos = data.xpos[self._torso_idx]
+                    # Place arrow above the robot for visibility
+                    origin = torso_pos + np.array([0.0, 0.0, 0.35])
+                    self._draw_force_arrow(renderer, origin, force, scale=force_vis_scale)
+
+                frames.append(renderer.render())
+        finally:
+            if renderer is not None:
+                renderer.close()
+            if gl_context is not None:
+                gl_context.free()
+
+        return frames
