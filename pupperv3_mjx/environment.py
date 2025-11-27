@@ -199,10 +199,14 @@ class PupperV3Env(PipelineEnv):
 
         self._reward_config = reward_config
         self._torso_geom_ids = body_name_to_geom_ids(sys.mj_model, torso_name)
-        self._torso_idx = mujoco.mj_name2id(
+        torso_body_id = mujoco.mj_name2id(
             sys.mj_model, mujoco.mjtObj.mjOBJ_BODY.value, torso_name
         )
-        assert self._torso_idx != -1, "torso not found"
+        assert torso_body_id != -1, "torso not found"
+        # Brax x.pos/x.rot arrays exclude the world body (body 0), so subtract 1
+        # But xfrc_applied still uses full mujoco body indexing
+        self._torso_idx = torso_body_id - 1
+        self._torso_body_id = torso_body_id  # for xfrc_applied
         self._action_scale = jp.array(action_scale)
         self._angular_velocity_noise = angular_velocity_noise
         self._gravity_noise = gravity_noise
@@ -370,7 +374,7 @@ class PupperV3Env(PipelineEnv):
             "rewards": {k: 0.0 for k in self._reward_config.rewards.scales.keys()},
             "kick": jp.array([0.0, 0.0]),
             'force_active': False,
-            'force_remaining_duration': 50,
+            'force_remaining_duration': 10,
             'force_current_vector': jp.array([0.0, 0.0, 0.0]),
             'force_target_vector': jp.array([0.0, 0.0, 0.0]),
             'force_application_point_noisy': self._force_application_point,
@@ -466,7 +470,7 @@ class PupperV3Env(PipelineEnv):
         )
 
         # Smooth interpolation between current and target force
-        alpha = 0.1  # Smoothing factor (lower = smoother transitions)
+        alpha = 0.5  # Smoothing factor (lower = smoother transitions)
         state.info["force_current_vector"] = (
             alpha * state.info["force_target_vector"] + 
             (1 - alpha) * state.info["force_current_vector"]
@@ -487,7 +491,7 @@ class PupperV3Env(PipelineEnv):
         wrench = jp.concatenate([torque, state.info["force_current_vector"]])
 
         xfrc = jp.zeros_like(state.pipeline_state.xfrc_applied)
-        xfrc = xfrc.at[self._torso_idx].set(wrench)
+        xfrc = xfrc.at[self._torso_body_id].set(wrench)
 
         state = state.tree_replace({"pipeline_state.xfrc_applied": xfrc})
 
@@ -769,9 +773,9 @@ class PupperV3Env(PipelineEnv):
 
                 renderer.update_scene(data, camera=camera)
 
-                force = np.asarray(pipeline_state.xfrc_applied[self._torso_idx, 3:])
+                force = np.asarray(pipeline_state.xfrc_applied[self._torso_body_id, 3:])
                 if np.linalg.norm(force) > 0.1:
-                    torso_pos = data.xpos[self._torso_idx]
+                    torso_pos = data.xpos[self._torso_body_id]
                     # Place arrow above the robot for visibility
                     origin = torso_pos + np.array([0.0, 0.0, 0.35])
                     self._draw_force_arrow(renderer, origin, force, scale=force_vis_scale)
