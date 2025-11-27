@@ -117,7 +117,7 @@ class PupperV3Env(PipelineEnv):
         force_duration_range: jax.Array = jp.array([50, 150]),
         force_magnitude_range: jax.Array = jp.array([5, 15]),
         force_application_point: jax.Array = jp.array([0.05, 0.0, 0.12]), #body frame, was jp.array([0.05, 0.0, 0.12]) before
-        force_point_noise_sd: float = 0.015,
+        force_point_noise_sd: float = 0.02,
         terminal_body_z: float = 0.1,
         early_termination_step_threshold: int = 500,
         terminal_body_angle: float = 0.52,
@@ -426,8 +426,8 @@ class PupperV3Env(PipelineEnv):
         
         theta = jax.random.uniform(force_direction_rng1, (), minval=0, maxval=2*jp.pi)
         # Sample z uniformly to get area-uniform sampling on hemisphere
-        # z range [0, sin(60 deg)] covers 0 to 60 degrees elevation from horizontal
-        max_z = jp.sin(jp.pi/3) # sin(60 deg) approx 0.866
+        # z range [0, sin(45 deg)] covers 0 to 45 degrees elevation from horizontal
+        max_z = jp.sin(jp.pi/4)  # sin(45 deg)
         z = jax.random.uniform(force_direction_rng2, (), minval=0, maxval=max_z)
         
         # Calculate xy radius from z (unit sphere: x^2 + y^2 + z^2 = 1)
