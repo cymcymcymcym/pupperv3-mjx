@@ -117,7 +117,7 @@ class PupperV3Env(PipelineEnv):
         force_duration_range: jax.Array = jp.array([50, 150]),
         force_magnitude_range: jax.Array = jp.array([5, 15]),
         force_application_point: jax.Array = jp.array([0.05, 0.0, 0.12]), #body frame, was jp.array([0.05, 0.0, 0.12]) before
-        force_point_noise_sd: float = 0.02,
+        force_point_noise_sd: float = 0.05,
         terminal_body_z: float = 0.1,
         early_termination_step_threshold: int = 500,
         terminal_body_angle: float = 0.52,
@@ -488,7 +488,8 @@ class PupperV3Env(PipelineEnv):
         torque = jp.cross(r, state.info["force_current_vector"])
         #torque = jp.zeros(3) # FORCE ZERO TORQUE FOR DEBUGGING
 
-        wrench = jp.concatenate([torque, state.info["force_current_vector"]])
+        # MuJoCo xfrc_applied format is [force_x, force_y, force_z, torque_x, torque_y, torque_z]
+        wrench = jp.concatenate([state.info["force_current_vector"], torque])
 
         xfrc = jp.zeros_like(state.pipeline_state.xfrc_applied)
         xfrc = xfrc.at[self._torso_body_id].set(wrench)
@@ -773,7 +774,8 @@ class PupperV3Env(PipelineEnv):
 
                 renderer.update_scene(data, camera=camera)
 
-                force = np.asarray(pipeline_state.xfrc_applied[self._torso_body_id, 3:])
+                # xfrc_applied format is [force_x, force_y, force_z, torque_x, torque_y, torque_z]
+                force = np.asarray(pipeline_state.xfrc_applied[self._torso_body_id, :3])
                 if np.linalg.norm(force) > 0.1:
                     torso_pos = data.xpos[self._torso_body_id]
                     # Place arrow above the robot for visibility
